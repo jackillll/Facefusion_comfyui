@@ -7,7 +7,7 @@ from .types import NodeClassMapping, NodeDisplayNameMapping
 
 NODE_CLASS_MAPPINGS : NodeClassMapping =\
 {
-	# Basic API nodes
+	# Basic local nodes
 	'SwapFaceImage': SwapFaceImage,
 	'SwapFaceVideo': SwapFaceVideo,
 	# Advanced nodes
@@ -23,9 +23,9 @@ NODE_CLASS_MAPPINGS : NodeClassMapping =\
 
 NODE_DISPLAY_NAME_MAPPINGS : NodeDisplayNameMapping =\
 {
-	# Basic API nodes
-	'SwapFaceImage': 'FF API: Swap Face (Image)',
-	'SwapFaceVideo': 'FF API: Swap Face (Video)',
+	# Basic local nodes
+	'SwapFaceImage': 'FF: Swap Face (Image)',
+	'SwapFaceVideo': 'FF: Swap Face (Video)',
 	# Advanced nodes
 	'AdvancedSwapFaceImage': 'FF: Advanced Swap Face (Image)',
 	'AdvancedSwapFaceVideo': 'FF: Advanced Swap Face (Video)',

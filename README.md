@@ -119,9 +119,19 @@ Edge padding for box mask: `top,right,bottom,left`
 | **Full quality** | Box + Occlusion + Region | Best quality, slower |
 
 ### face_selector_mode
-- `one` - Single face (use face_position to select)
+- `one` - Single face (use `target_face_index` to select)
 - `many` - All detected faces
 - `reference` - Match faces similar to reference image
+
+### source_face_index / target_face_index
+- `source_face_index` - Select which detected face from the source image to use
+- `target_face_index` - Select which detected face from the target image to replace when `face_selector_mode='one'`
+- Both indices respect their own sort orders, so `0` means "the first face after sorting"
+
+### source_sort_order / target_sort_order
+- Source and target images now sort independently before applying indices
+- Useful for multi-person scenes where source and target need different ordering rules
+- Supports `large-small`, `small-large`, `left-right`, `right-left`, `top-bottom`, `bottom-top`, `best-worst`, `worst-best`
 
 ### sort_order
 - `large-small` ⭐ Biggest face first
@@ -187,6 +197,7 @@ All image swapper nodes **automatically detect and handle**:
 - Model: `hyperswap_1c_256`
 - Pixel Boost: `512x512`
 - Max Workers: `4-8`
+- Repeated source frames and duplicate target frames now reuse local face detection cache automatically
 
 ---
 

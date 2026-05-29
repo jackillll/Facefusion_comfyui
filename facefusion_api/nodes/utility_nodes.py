@@ -33,9 +33,7 @@ class PixelBoostNode:
 		"""Pass through image and pixel boost setting."""
 		# This node serves as a configuration node for pixel boost settings
 		# The actual pixel boost processing happens in the face swapping nodes
-		# For API-based workflow, this setting is informational only
 		# print(f"[PixelBoostNode] Setting: {pixel_boost}")
-		# print(f"[PixelBoostNode] Note: Full pixel boost will be available with local face swapping")
 		return (image, pixel_boost)
 
 
@@ -52,13 +50,6 @@ class FaceSwapApplier:
 			{
 				'source_images': (IO.IMAGE,),
 				'target_face_data': ('FACE_DATA',),
-				'api_token':
-				(
-					'STRING',
-					{
-						'default': '-1'
-					}
-				),
 				'face_swapper_model':
 				(
 					[
@@ -110,6 +101,13 @@ class FaceSwapApplier:
 						'max': 100,
 						'step': 1
 					}
+				),
+				'enable_nsfw_check':
+				(
+					'BOOLEAN',
+					{
+						'default': True
+					}
 				)
 			}
 		}
@@ -123,13 +121,13 @@ class FaceSwapApplier:
 		self,
 		source_images: Tensor,
 		target_face_data: Dict,
-		api_token: str,
 		face_swapper_model: FaceSwapperModel,
 		pixel_boost: str,
 		face_occluder_model: str,
 		face_parser_model: str,
 		face_mask_blur: float,
-		face_index: int
+		face_index: int,
+		enable_nsfw_check: bool = True
 	) -> Tuple[Tensor, Dict]:
 		"""Apply face swap to specific detected face - smart batch handling."""
 		try:
@@ -150,6 +148,49 @@ class FaceSwapApplier:
 				source_image = source_images[0:1]
 			else:
 				source_image = source_images
+
+			# Use the detected face selection directly for local inference.
+			if target_image.dim() == 4 and target_image.shape[0] == 1:
+				source_cv2 = tensor_to_cv2(source_image)
+				target_cv2 = tensor_to_cv2(target_image)
+
+				if enable_nsfw_check and CONTENT_FILTER_AVAILABLE:
+					if analyse_frame(source_cv2) or analyse_frame(target_cv2):
+						print("[ContentFilter] NSFW content detected - returning blurred output")
+						return (cv2_to_tensor(blur_frame(target_cv2)), target_face_data)
+
+				source_faces = detect_faces(source_cv2)
+				if not source_faces:
+					print("No source faces detected")
+					return (target_image, target_face_data)
+
+				selected_face = faces[face_index]
+				target_face = {
+					'bbox': np.asarray(selected_face['bbox'], dtype=np.float32),
+					'landmarks': np.asarray(selected_face['landmarks'], dtype=np.float32),
+					'score': float(selected_face.get('score', 0.0)),
+					'area': float(selected_face.get('area', 0.0)),
+				}
+				if selected_face.get('embedding') is not None:
+					target_face['embedding'] = np.asarray(selected_face['embedding'], dtype=np.float32)
+				if selected_face.get('embedding_norm') is not None:
+					target_face['embedding_norm'] = np.asarray(selected_face['embedding_norm'], dtype=np.float32)
+
+				occluder = None if face_occluder_model == 'none' else get_face_occluder(face_occluder_model)
+				parser = None if face_parser_model == 'none' else get_face_parser(face_parser_model)
+				swapper = get_local_swapper(face_swapper_model)
+				swapped_cv2 = swapper.swap_face(
+					source_faces[0],
+					target_face,
+					target_cv2,
+					pixel_boost,
+					face_mask_blur,
+					occluder,
+					parser,
+					source_cv2,
+					['box']
+				)
+				return (cv2_to_tensor(swapped_cv2), target_face_data)
 			
 			# Smart batch handling for target images
 			if target_image.dim() == 4 and target_image.shape[0] > 1:
@@ -161,12 +202,12 @@ class FaceSwapApplier:
 					swapped = SwapFaceImage.swap_face(
 						source_image, 
 						single_target, 
-						api_token, 
 						face_swapper_model, 
 						pixel_boost, 
 						face_mask_blur,
 						face_occluder_model,
-						face_parser_model
+						face_parser_model,
+						enable_nsfw_check=enable_nsfw_check
 					)
 					output_images.append(swapped)
 				swapped_image = torch.cat(output_images, dim=0)
@@ -175,12 +216,12 @@ class FaceSwapApplier:
 				swapped_image = SwapFaceImage.swap_face(
 					source_image, 
 					target_image, 
-					api_token, 
 					face_swapper_model, 
 					pixel_boost, 
 					face_mask_blur,
 					face_occluder_model,
-					face_parser_model
+					face_parser_model,
+					enable_nsfw_check=enable_nsfw_check
 				)
 			
 			print(f"Applied face swap to face {face_index}")

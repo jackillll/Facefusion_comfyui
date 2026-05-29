@@ -94,7 +94,8 @@ class LocalFaceSwapper:
         face_mask_types: Optional[List[str]] = None,
         face_mask_areas: Optional[List[str]] = None,
         face_mask_regions: Optional[List[str]] = None,
-        face_mask_padding: Tuple[int, int, int, int] = (0, 0, 0, 0)
+        face_mask_padding: Tuple[int, int, int, int] = (0, 0, 0, 0),
+        prepared_source_embedding: Optional[NDArray] = None
     ) -> VisionFrame:
         """Swap a single face in the target image with multi-mask support."""
         if self.model_session is None:
@@ -119,7 +120,7 @@ class LocalFaceSwapper:
             pixel_boost_total = pixel_boost_size[0] // model_size[0]
             
             # Prepare source frame for models that need it (blendswap, uniface)
-            if model_type in ['blendswap', 'uniface'] and source_image is not None:
+            if model_type in ['blendswap', 'uniface'] and source_image is not None and 'source_frame' not in source_face:
                 source_face['source_frame'] = self._prepare_source_frame(source_image, source_face, model_type)
             
             # Warp target face to pixel boost size
@@ -152,9 +153,11 @@ class LocalFaceSwapper:
             
             # Process each patch through the model
             swapped_patches = []
+            source_embedding = prepared_source_embedding
+            if source_embedding is None:
+                source_embedding = self._prepare_source_embedding(source_face, target_face, model_type)
             for patch in crop_patches:
                 patch_prepared = self._prepare_crop_frame(patch)
-                source_embedding = self._prepare_source_embedding(source_face, target_face, model_type)
                 swapped_patch = self._forward_swap(patch_prepared, source_embedding, model_type, source_face)
                 swapped_patch = self._normalize_crop_frame(swapped_patch)
                 swapped_patches.append(swapped_patch)
@@ -176,6 +179,19 @@ class LocalFaceSwapper:
                     ).reshape(-1, 2)
                     area_mask = self._create_area_mask(crop_frame_swapped, face_landmark_68_transformed, face_mask_areas)
                     crop_masks.append(area_mask)
+                else:
+                    face_landmark_5 = target_face.get('landmarks')
+                    if face_landmark_5 is not None:
+                        face_landmark_5_transformed = cv2.transform(
+                            face_landmark_5.reshape(1, -1, 2).astype(np.float32),
+                            affine_matrix
+                        ).reshape(-1, 2)
+                        area_mask = self._create_area_mask_from_landmarks5(
+                            crop_frame_swapped,
+                            face_landmark_5_transformed,
+                            face_mask_areas
+                        )
+                        crop_masks.append(area_mask)
             
             # REGION mask (using face parser model - created after swapping per facefusion-master logic)
             if 'region' in face_mask_types and face_parser is not None and face_mask_regions:
@@ -499,6 +515,61 @@ class LocalFaceSwapper:
         except Exception as e:
             print(f"[LocalFaceSwapper] Warning: Could not create area mask: {e}")
             return np.ones(crop_size[::-1], dtype=np.float32)
+
+    def _create_area_mask_from_landmarks5(self, crop_vision_frame: VisionFrame, face_landmark_5: NDArray, face_mask_areas: List[str]) -> NDArray:
+        """Approximate area mask when only 5-point landmarks are available."""
+        height, width = crop_vision_frame.shape[:2]
+        left_eye, right_eye, nose, left_mouth, right_mouth = face_landmark_5.astype(np.float32)
+
+        def clamp_points(points: NDArray) -> NDArray:
+            points[:, 0] = np.clip(points[:, 0], 0, width - 1)
+            points[:, 1] = np.clip(points[:, 1], 0, height - 1)
+            return points.astype(np.int32)
+
+        area_mask = np.zeros((height, width), dtype=np.float32)
+        mouth_center = (left_mouth + right_mouth) / 2.0
+        eye_center = (left_eye + right_eye) / 2.0
+        mouth_span = max(np.linalg.norm(right_mouth - left_mouth), width * 0.12)
+        eye_span = max(np.linalg.norm(right_eye - left_eye), width * 0.18)
+        forehead_y = max(0.0, min(left_eye[1], right_eye[1]) - height * 0.22)
+        chin_y = min(height - 1.0, max(left_mouth[1], right_mouth[1]) + height * 0.20)
+
+        for face_mask_area in face_mask_areas:
+            if face_mask_area == 'upper-face':
+                upper_points = np.array([
+                    [width * 0.18, forehead_y],
+                    [width * 0.50, max(0.0, forehead_y - height * 0.08)],
+                    [width * 0.82, forehead_y],
+                    [right_eye[0] + eye_span * 0.15, right_eye[1]],
+                    [nose[0], nose[1]],
+                    [left_eye[0] - eye_span * 0.15, left_eye[1]],
+                ], dtype=np.float32)
+                cv2.fillConvexPoly(area_mask, cv2.convexHull(clamp_points(upper_points)), 1.0)
+            elif face_mask_area == 'lower-face':
+                lower_points = np.array([
+                    [left_mouth[0] - mouth_span * 0.25, left_mouth[1]],
+                    [nose[0], nose[1]],
+                    [right_mouth[0] + mouth_span * 0.25, right_mouth[1]],
+                    [width * 0.82, chin_y],
+                    [width * 0.50, height - 1.0],
+                    [width * 0.18, chin_y],
+                ], dtype=np.float32)
+                cv2.fillConvexPoly(area_mask, cv2.convexHull(clamp_points(lower_points)), 1.0)
+            elif face_mask_area == 'mouth':
+                mouth_height = max(mouth_span * 0.45, height * 0.06)
+                mouth_points = np.array([
+                    [left_mouth[0] - mouth_span * 0.18, mouth_center[1]],
+                    [mouth_center[0], mouth_center[1] - mouth_height * 0.55],
+                    [right_mouth[0] + mouth_span * 0.18, mouth_center[1]],
+                    [mouth_center[0], mouth_center[1] + mouth_height * 0.65],
+                ], dtype=np.float32)
+                cv2.fillConvexPoly(area_mask, cv2.convexHull(clamp_points(mouth_points)), 1.0)
+
+        if area_mask.max() == 0:
+            return np.ones((height, width), dtype=np.float32)
+
+        area_mask = (cv2.GaussianBlur(area_mask.clip(0, 1), (0, 0), 5).clip(0.5, 1) - 0.5) * 2
+        return area_mask
     
     def _paste_back(
         self,

@@ -128,8 +128,8 @@ class FaceDetectorNode:
 				if ref_faces:
 					# Get first reference face
 					ref_face = ref_faces[0]
-					# Find matching faces
-					from .utils import find_matching_faces
+					# Find matching faces using the shared face utilities module.
+					from ..utils import find_matching_faces
 					selected_faces = find_matching_faces(ref_face, faces, reference_face_distance)
 			
 			# print(f"Detected {len(faces)} faces, selected {len(selected_faces)} faces")

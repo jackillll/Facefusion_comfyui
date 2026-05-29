@@ -2,6 +2,9 @@
 Local face detection using ONNX models - matches facefusion implementation.
 """
 import os
+import hashlib
+from collections import OrderedDict
+from threading import Lock
 from typing import List, Optional, Tuple
 from functools import lru_cache
 
@@ -15,6 +18,45 @@ from ..utils import (
     create_face_dict, sort_faces_by_order, select_face_by_position,
     find_matching_faces, get_model_path, ensure_model_exists
 )
+
+
+_DETECTION_CACHE_MAX_SIZE = 256
+_detection_cache = OrderedDict()
+_detection_cache_lock = Lock()
+
+
+def _hash_image(image: VisionFrame) -> str:
+    return hashlib.md5(np.ascontiguousarray(image).tobytes()).hexdigest()
+
+
+def _clone_faces(faces: List[Face]) -> List[Face]:
+    cloned_faces = []
+    for face in faces:
+        cloned_face = {}
+        for key, value in face.items():
+            if isinstance(value, np.ndarray):
+                cloned_face[key] = value.copy()
+            else:
+                cloned_face[key] = value
+        cloned_faces.append(cloned_face)
+    return cloned_faces
+
+
+def _get_cached_faces(cache_key: Tuple[str, float, bool, str]) -> Optional[List[Face]]:
+    with _detection_cache_lock:
+        cached_faces = _detection_cache.get(cache_key)
+        if cached_faces is None:
+            return None
+        _detection_cache.move_to_end(cache_key)
+        return _clone_faces(cached_faces)
+
+
+def _store_cached_faces(cache_key: Tuple[str, float, bool, str], faces: List[Face]) -> None:
+    with _detection_cache_lock:
+        _detection_cache[cache_key] = _clone_faces(faces)
+        _detection_cache.move_to_end(cache_key)
+        while len(_detection_cache) > _DETECTION_CACHE_MAX_SIZE:
+            _detection_cache.popitem(last=False)
 
 
 class FaceDetector:
@@ -67,7 +109,7 @@ class FaceDetector:
             print(f"Error initializing face detector: {e}")
             return False
     
-    def detect_faces(self, image: VisionFrame, score_threshold: float = 0.3) -> List[Face]:
+    def detect_faces(self, image: VisionFrame, score_threshold: float = 0.3, with_embedding: bool = True) -> List[Face]:
         """Detect faces - supports multiple detector models."""
         if self.detector_session is None:
             if not self.initialize():
@@ -106,12 +148,12 @@ class FaceDetector:
             faces = []
             for bbox, score, landmark in zip(bboxes, scores, landmarks):
                 face = create_face_dict(bbox, landmark, score)
-                # Get embedding (raw + normalized)
-                embeddings = self._get_face_embedding(image, face)
-                if embeddings is not None:
-                    embedding, embedding_norm = embeddings
-                    face['embedding'] = embedding
-                    face['embedding_norm'] = embedding_norm
+                if with_embedding:
+                    embeddings = self._get_face_embedding(image, face)
+                    if embeddings is not None:
+                        embedding, embedding_norm = embeddings
+                        face['embedding'] = embedding
+                        face['embedding_norm'] = embedding_norm
                 faces.append(face)
             
             return faces
@@ -508,11 +550,22 @@ def detect_faces(
     image: VisionFrame,
     score_threshold: float = 0.3,
     sort_order: str = 'large-small',
-    detector_model: str = 'scrfd'
+    detector_model: str = 'scrfd',
+    with_embedding: bool = True,
+    use_cache: bool = True
 ) -> List[Face]:
     """Detect and sort faces in an image."""
+    cache_key = None
+    if use_cache:
+        cache_key = (detector_model, round(score_threshold, 4), with_embedding, _hash_image(image))
+        cached_faces = _get_cached_faces(cache_key)
+        if cached_faces is not None:
+            return sort_faces_by_order(cached_faces, sort_order)
+
     detector = get_face_detector(detector_model)
-    faces = detector.detect_faces(image, score_threshold)
+    faces = detector.detect_faces(image, score_threshold, with_embedding=with_embedding)
+    if cache_key is not None:
+        _store_cached_faces(cache_key, faces)
     return sort_faces_by_order(faces, sort_order)
 
 
